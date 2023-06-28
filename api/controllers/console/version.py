@@ -15,10 +15,10 @@ class VersionApi(Resource):
 
     def get(self):
         return {
-            "version": "0.3.5",
-            "release_date": "2023-06-21",
-            "release_notes": "http://docs.dify.ai",
-            "can_auto_update": True
+            'version': '0.0.0',
+            'release_date': '',
+            'release_notes': '',
+            'can_auto_update': False
         }
 
         # parser = reqparse.RequestParser()
