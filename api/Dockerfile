@@ -15,7 +15,7 @@ WORKDIR /app/api
 
 COPY requirements.txt /app/api/requirements.txt
 
-RUN pip install -r requirements.txt
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir -r requirements.txt
 
 COPY . /app/api/
 
