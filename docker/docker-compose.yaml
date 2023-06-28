@@ -4,8 +4,6 @@ services:
   api:
     image: langgenius/dify-api:0.3.4
     restart: always
-    ports:
-      - "5001:5001"
     environment:
 
       # Startup mode, 'api' starts the API server.
@@ -163,8 +161,6 @@ services:
   web:
     image: langgenius/dify-web:0.3.4
     restart: always
-    ports:
-      - "3000:3000"
     environment:
       EDITION: SELF_HOSTED
       # The base URL of console application, refers to the Console base URL of WEB service if console domain is
@@ -228,14 +224,14 @@ services:
   # The nginx reverse proxy.
   # used for reverse proxying the API service and Web service.
 
-#  nginx:
-#    image: nginx:latest
-#    volumes:
-#      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
-#      - ./nginx/proxy.conf:/etc/nginx/proxy.conf
-#      - ./nginx/conf.d:/etc/nginx/conf.d
-#    depends_on:
-#      - api
-#      - web
-#    ports:
-#      - "80:80"
+  nginx:
+    image: nginx:latest
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/proxy.conf:/etc/nginx/proxy.conf
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - api
+      - web
+    ports:
+      - "80:80"
