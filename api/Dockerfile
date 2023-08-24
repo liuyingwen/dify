@@ -15,15 +15,18 @@ EXPOSE 5001
 
 WORKDIR /app/api
 
+RUN touch /etc/apt/sources.list
+RUN sed -i s@/archive.ubuntu.com/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+RUN sed -i s@/deb.debian.org/@/mirrors.aliyun.com/@g /etc/apt/sources.list
+RUN apt-get clean
 RUN apt-get update && \
     apt-get install -y bash curl wget vim gcc g++ python3-dev libc-dev libffi-dev nodejs
 
 COPY requirements.txt /app/api/requirements.txt
 
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 
 COPY . /app/api/
-
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
