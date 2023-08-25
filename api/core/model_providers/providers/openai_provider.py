@@ -150,10 +150,10 @@ class OpenAIProvider(BaseModelProvider):
             raise CredentialsValidateFailedError('OpenAI API key is required')
 
         try:
-            openai_api_keys = credentials['openai_api_key'].split(';')
+            # openai_api_keys = credentials['openai_api_key'].split(';')
             credentials_kwargs = {
-                # "api_key": credentials['openai_api_key']
-                'api_key': random.choice(openai_api_keys)
+                "api_key": credentials['openai_api_key']
+                # 'api_key': random.choice(openai_api_keys)
             }
 
             if 'openai_api_base' in credentials and credentials['openai_api_base']:
@@ -193,15 +193,15 @@ class OpenAIProvider(BaseModelProvider):
                 }
 
             if credentials['openai_api_key']:
-                # credentials['openai_api_key'] = encrypter.decrypt_token(
-                #     self.provider.tenant_id,
-                #     credentials['openai_api_key']
-                # )
-                openai_api_keys = encrypter.decrypt_token(
+                credentials['openai_api_key'] = encrypter.decrypt_token(
                     self.provider.tenant_id,
                     credentials['openai_api_key']
                 )
-                credentials['openai_api_key'] = random.choice(openai_api_keys.split(';'))
+                # openai_api_keys = encrypter.decrypt_token(
+                #     self.provider.tenant_id,
+                #     credentials['openai_api_key']
+                # )
+                # credentials['openai_api_key'] = random.choice(openai_api_keys.split(';'))
 
                 if obfuscated:
                     credentials['openai_api_key'] = encrypter.obfuscated_token(credentials['openai_api_key'])
