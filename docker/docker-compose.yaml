@@ -213,6 +213,11 @@ services:
       - ./volumes/db/data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
 
   # The redis cache.
   redis:
@@ -223,6 +228,8 @@ services:
       - ./volumes/redis/data:/data
     # Set the redis password when startup redis server.
     command: redis-server --requirepass difyai123456
+    healthcheck:
+      test: ["CMD", "redis-cli","ping"]
 
   # The Weaviate vector store.
   weaviate:
