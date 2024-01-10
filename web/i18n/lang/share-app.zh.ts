@@ -9,6 +9,7 @@ const translation = {
     pinnedTitle: '已置顶',
     unpinnedTitle: '对话列表',
     newChatDefaultName: '新的对话',
+    resetChat: '重置对话',
     powerBy: 'Powered by',
     prompt: '提示词',
     privatePromptConfigTitle: '对话设置',
@@ -51,6 +52,11 @@ const translation = {
     csvStructureTitle: 'CSV 文件必须符合以下结构：',
     downloadTemplate: '下载模板',
     field: '',
+    batchFailed: {
+      info: '{{num}} 次运行失败',
+      retry: '重试',
+      outputPlaceholder: '无输出内容',
+    },
     errorMsg: {
       empty: '上传文件的内容不能为空',
       fileStructNotMatch: '上传文件的内容与结构不匹配',

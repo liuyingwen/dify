@@ -1,32 +1,48 @@
 import logging
+import random
 
-import openai
-from flask import current_app
-
-from core.model_providers.error import LLMBadRequestError
-from core.model_providers.providers.base import BaseModelProvider
+from core.entities.application_entities import ModelConfigEntity
+from core.model_runtime.errors.invoke import InvokeBadRequestError
+from core.model_runtime.model_providers.openai.moderation.moderation import OpenAIModerationModel
+from extensions.ext_hosting_provider import hosting_configuration
 from models.provider import ProviderType
 
+logger = logging.getLogger(__name__)
 
-def check_moderation(model_provider: BaseModelProvider, text: str) -> bool:
-    if current_app.config['HOSTED_MODERATION_ENABLED'] and current_app.config['HOSTED_MODERATION_PROVIDERS']:
-        moderation_providers = current_app.config['HOSTED_MODERATION_PROVIDERS'].split(',')
 
-        if model_provider.provider.provider_type == ProviderType.SYSTEM.value \
-                and model_provider.provider_name in moderation_providers:
+def check_moderation(model_config: ModelConfigEntity, text: str) -> bool:
+    moderation_config = hosting_configuration.moderation_config
+    if (moderation_config and moderation_config.enabled is True
+            and 'openai' in hosting_configuration.provider_map
+            and hosting_configuration.provider_map['openai'].enabled is True
+    ):
+        using_provider_type = model_config.provider_model_bundle.configuration.using_provider_type
+        provider_name = model_config.provider
+        if using_provider_type == ProviderType.SYSTEM \
+                and provider_name in moderation_config.providers:
+            hosting_openai_config = hosting_configuration.provider_map['openai']
+
             # 2000 text per chunk
             length = 2000
-            chunks = [text[i:i + length] for i in range(0, len(text), length)]
+            text_chunks = [text[i:i + length] for i in range(0, len(text), length)]
+
+            if len(text_chunks) == 0:
+                return True
+
+            text_chunk = random.choice(text_chunks)
 
             try:
-                moderation_result = openai.Moderation.create(input=chunks,
-                                                             api_key=current_app.config['HOSTED_OPENAI_API_KEY'])
+                model_type_instance = OpenAIModerationModel()
+                moderation_result = model_type_instance.invoke(
+                    model='text-moderation-stable',
+                    credentials=hosting_openai_config.credentials,
+                    text=text_chunk
+                )
+
+                if moderation_result is True:
+                    return True
             except Exception as ex:
-                logging.exception(ex)
-                raise LLMBadRequestError('Rate limit exceeded, please try again later.')
+                logger.exception(ex)
+                raise InvokeBadRequestError('Rate limit exceeded, please try again later.')
 
-            for result in moderation_result.results:
-                if result['flagged'] is True:
-                    return False
-
-    return True
+    return False

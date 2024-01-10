@@ -5,7 +5,7 @@ from typing import Generator, Union
 
 from flask import stream_with_context, Response
 from flask_login import current_user
-from flask_restful import reqparse, fields, marshal_with
+from flask_restful import reqparse, marshal_with
 from flask_restful.inputs import int_range
 from werkzeug.exceptions import NotFound, InternalServerError
 
@@ -13,11 +13,14 @@ import services
 from controllers.console import api
 from controllers.console.app.error import AppMoreLikeThisDisabledError, ProviderNotInitializeError, \
     ProviderQuotaExceededError, ProviderModelCurrentlyNotSupportError, CompletionRequestError
-from controllers.console.explore.error import NotCompletionAppError, AppSuggestedQuestionsAfterAnswerDisabledError
+from controllers.console.explore.error import NotCompletionAppError, AppSuggestedQuestionsAfterAnswerDisabledError, \
+    NotChatAppError
 from controllers.console.explore.wraps import InstalledAppResource
-from core.model_providers.error import LLMRateLimitError, LLMBadRequestError, LLMAuthorizationError, LLMAPIConnectionError, \
-    ProviderTokenNotInitError, LLMAPIUnavailableError, QuotaExceededError, ModelCurrentlyNotSupportError
-from libs.helper import uuid_value, TimestampField
+from core.entities.application_entities import InvokeFrom
+from core.errors.error import ProviderTokenNotInitError, QuotaExceededError, ModelCurrentlyNotSupportError
+from core.model_runtime.errors.invoke import InvokeError
+from fields.message_fields import message_infinite_scroll_pagination_fields
+from libs.helper import uuid_value
 from services.completion_service import CompletionService
 from services.errors.app import MoreLikeThisDisabledError
 from services.errors.conversation import ConversationNotExistsError
@@ -26,45 +29,6 @@ from services.message_service import MessageService
 
 
 class MessageListApi(InstalledAppResource):
-    feedback_fields = {
-        'rating': fields.String
-    }
-
-    retriever_resource_fields = {
-        'id': fields.String,
-        'message_id': fields.String,
-        'position': fields.Integer,
-        'dataset_id': fields.String,
-        'dataset_name': fields.String,
-        'document_id': fields.String,
-        'document_name': fields.String,
-        'data_source_type': fields.String,
-        'segment_id': fields.String,
-        'score': fields.Float,
-        'hit_count': fields.Integer,
-        'word_count': fields.Integer,
-        'segment_position': fields.Integer,
-        'index_node_hash': fields.String,
-        'content': fields.String,
-        'created_at': TimestampField
-    }
-
-    message_fields = {
-        'id': fields.String,
-        'conversation_id': fields.String,
-        'inputs': fields.Raw,
-        'query': fields.String,
-        'answer': fields.String,
-        'feedback': fields.Nested(feedback_fields, attribute='user_feedback', allow_null=True),
-        'retriever_resources': fields.List(fields.Nested(retriever_resource_fields)),
-        'created_at': TimestampField
-    }
-
-    message_infinite_scroll_pagination_fields = {
-        'limit': fields.Integer,
-        'has_more': fields.Boolean,
-        'data': fields.List(fields.Nested(message_fields))
-    }
 
     @marshal_with(message_infinite_scroll_pagination_fields)
     def get(self, installed_app):
@@ -121,7 +85,13 @@ class MessageMoreLikeThisApi(InstalledAppResource):
         streaming = args['response_mode'] == 'streaming'
 
         try:
-            response = CompletionService.generate_more_like_this(app_model, current_user, message_id, streaming)
+            response = CompletionService.generate_more_like_this(
+                app_model=app_model,
+                user=current_user,
+                message_id=message_id,
+                invoke_from=InvokeFrom.EXPLORE,
+                streaming=streaming
+            )
             return compact_response(response)
         except MessageNotExistsError:
             raise NotFound("Message Not Exists.")
@@ -133,9 +103,8 @@ class MessageMoreLikeThisApi(InstalledAppResource):
             raise ProviderQuotaExceededError()
         except ModelCurrentlyNotSupportError:
             raise ProviderModelCurrentlyNotSupportError()
-        except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                LLMRateLimitError, LLMAuthorizationError) as e:
-            raise CompletionRequestError(str(e))
+        except InvokeError as e:
+            raise CompletionRequestError(e.description)
         except ValueError as e:
             raise e
         except Exception:
@@ -143,7 +112,7 @@ class MessageMoreLikeThisApi(InstalledAppResource):
             raise InternalServerError()
 
 
-def compact_response(response: Union[dict | Generator]) -> Response:
+def compact_response(response: Union[dict, Generator]) -> Response:
     if isinstance(response, dict):
         return Response(response=json.dumps(response), status=200, mimetype='application/json')
     else:
@@ -161,9 +130,8 @@ def compact_response(response: Union[dict | Generator]) -> Response:
                 yield "data: " + json.dumps(api.handle_error(ProviderQuotaExceededError()).get_json()) + "\n\n"
             except ModelCurrentlyNotSupportError:
                 yield "data: " + json.dumps(api.handle_error(ProviderModelCurrentlyNotSupportError()).get_json()) + "\n\n"
-            except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                    LLMRateLimitError, LLMAuthorizationError) as e:
-                yield "data: " + json.dumps(api.handle_error(CompletionRequestError(str(e))).get_json()) + "\n\n"
+            except InvokeError as e:
+                yield "data: " + json.dumps(api.handle_error(CompletionRequestError(e.description)).get_json()) + "\n\n"
             except ValueError as e:
                 yield "data: " + json.dumps(api.handle_error(e).get_json()) + "\n\n"
             except Exception:
@@ -200,9 +168,8 @@ class MessageSuggestedQuestionApi(InstalledAppResource):
             raise ProviderQuotaExceededError()
         except ModelCurrentlyNotSupportError:
             raise ProviderModelCurrentlyNotSupportError()
-        except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                LLMRateLimitError, LLMAuthorizationError) as e:
-            raise CompletionRequestError(str(e))
+        except InvokeError as e:
+            raise CompletionRequestError(e.description)
         except Exception:
             logging.exception("internal server error.")
             raise InternalServerError()

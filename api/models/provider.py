@@ -96,7 +96,7 @@ class ProviderModel(db.Model):
     id = db.Column(UUID, server_default=db.text('uuid_generate_v4()'))
     tenant_id = db.Column(UUID, nullable=False)
     provider_name = db.Column(db.String(40), nullable=False)
-    model_name = db.Column(db.String(40), nullable=False)
+    model_name = db.Column(db.String(255), nullable=False)
     model_type = db.Column(db.String(40), nullable=False)
     encrypted_config = db.Column(db.Text, nullable=True)
     is_valid = db.Column(db.Boolean, nullable=False, server_default=db.text('false'))
@@ -133,21 +133,6 @@ class TenantPreferredModelProvider(db.Model):
     preferred_provider_type = db.Column(db.String(40), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, server_default=db.text('CURRENT_TIMESTAMP(0)'))
     updated_at = db.Column(db.DateTime, nullable=False, server_default=db.text('CURRENT_TIMESTAMP(0)'))
-
-
-class ProviderOrderPaymentStatus(Enum):
-    WAIT_PAY = 'wait_pay'
-    PAID = 'paid'
-    PAY_FAILED = 'pay_failed'
-    REFUNDED = 'refunded'
-
-    @staticmethod
-    def value_of(value):
-        for member in ProviderOrderPaymentStatus:
-            if member.value == value:
-                return member
-        raise ValueError(f"No matching enum found for value '{value}'")
-
 
 
 class ProviderOrder(db.Model):

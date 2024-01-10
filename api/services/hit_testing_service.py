@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from typing import List
 
@@ -9,16 +10,28 @@ from langchain.schema import Document
 from sklearn.manifold import TSNE
 
 from core.embedding.cached_embedding import CacheEmbedding
-from core.index.vector_index.vector_index import VectorIndex
-from core.model_providers.model_factory import ModelFactory
+from core.model_manager import ModelManager
+from core.model_runtime.entities.model_entities import ModelType
+from core.rerank.rerank import RerankRunner
 from extensions.ext_database import db
 from models.account import Account
 from models.dataset import Dataset, DocumentSegment, DatasetQuery
+from services.retrieval_service import RetrievalService
 
+default_retrieval_model = {
+    'search_method': 'semantic_search',
+    'reranking_enable': False,
+    'reranking_model': {
+        'reranking_provider_name': '',
+        'reranking_model_name': ''
+    },
+    'top_k': 2,
+    'score_threshold_enabled': False
+}
 
 class HitTestingService:
     @classmethod
-    def retrieve(cls, dataset: Dataset, query: str, account: Account, limit: int = 10) -> dict:
+    def retrieve(cls, dataset: Dataset, query: str, account: Account, retrieval_model: dict, limit: int = 10) -> dict:
         if dataset.available_document_count == 0 or dataset.available_segment_count == 0:
             return {
                 "query": {
@@ -28,28 +41,79 @@ class HitTestingService:
                 "records": []
             }
 
-        embedding_model = ModelFactory.get_embedding_model(
+        start = time.perf_counter()
+
+        # get retrieval model , if the model is not setting , using default
+        if not retrieval_model:
+            retrieval_model = dataset.retrieval_model if dataset.retrieval_model else default_retrieval_model
+
+        # get embedding model
+        model_manager = ModelManager()
+        embedding_model = model_manager.get_model_instance(
             tenant_id=dataset.tenant_id,
-            model_provider_name=dataset.embedding_model_provider,
-            model_name=dataset.embedding_model
+            model_type=ModelType.TEXT_EMBEDDING,
+            provider=dataset.embedding_model_provider,
+            model=dataset.embedding_model
         )
 
         embeddings = CacheEmbedding(embedding_model)
 
-        vector_index = VectorIndex(
-            dataset=dataset,
-            config=current_app.config,
-            embeddings=embeddings
-        )
+        all_documents = []
+        threads = []
 
-        start = time.perf_counter()
-        documents = vector_index.search(
-            query,
-            search_type='similarity_score_threshold',
-            search_kwargs={
-                'k': 10
-            }
-        )
+        # retrieval_model source with semantic
+        if retrieval_model['search_method'] == 'semantic_search' or retrieval_model['search_method'] == 'hybrid_search':
+            embedding_thread = threading.Thread(target=RetrievalService.embedding_search, kwargs={
+                'flask_app': current_app._get_current_object(),
+                'dataset_id': str(dataset.id),
+                'query': query,
+                'top_k': retrieval_model['top_k'],
+                'score_threshold': retrieval_model['score_threshold'] if retrieval_model['score_threshold_enabled'] else None,
+                'reranking_model': retrieval_model['reranking_model'] if retrieval_model['reranking_enable'] else None,
+                'all_documents': all_documents,
+                'search_method': retrieval_model['search_method'],
+                'embeddings': embeddings
+            })
+            threads.append(embedding_thread)
+            embedding_thread.start()
+
+        # retrieval source with full text
+        if retrieval_model['search_method'] == 'full_text_search' or retrieval_model['search_method'] == 'hybrid_search':
+            full_text_index_thread = threading.Thread(target=RetrievalService.full_text_index_search, kwargs={
+                'flask_app': current_app._get_current_object(),
+                'dataset_id': str(dataset.id),
+                'query': query,
+                'search_method': retrieval_model['search_method'],
+                'embeddings': embeddings,
+                'score_threshold': retrieval_model['score_threshold'] if retrieval_model['score_threshold_enabled'] else None,
+                'top_k': retrieval_model['top_k'],
+                'reranking_model': retrieval_model['reranking_model'] if retrieval_model['reranking_enable'] else None,
+                'all_documents': all_documents
+            })
+            threads.append(full_text_index_thread)
+            full_text_index_thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        if retrieval_model['search_method'] == 'hybrid_search':
+            model_manager = ModelManager()
+            rerank_model_instance = model_manager.get_model_instance(
+                tenant_id=dataset.tenant_id,
+                provider=retrieval_model['reranking_model']['reranking_provider_name'],
+                model_type=ModelType.RERANK,
+                model=retrieval_model['reranking_model']['reranking_model_name']
+            )
+
+            rerank_runner = RerankRunner(rerank_model_instance)
+            all_documents = rerank_runner.run(
+                query=query,
+                documents=all_documents,
+                score_threshold=retrieval_model['score_threshold'] if retrieval_model['score_threshold_enabled'] else None,
+                top_n=retrieval_model['top_k'],
+                user=f"account-{account.id}"
+            )
+
         end = time.perf_counter()
         logging.debug(f"Hit testing retrieve in {end - start:0.4f} seconds")
 
@@ -64,7 +128,7 @@ class HitTestingService:
         db.session.add(dataset_query)
         db.session.commit()
 
-        return cls.compact_retrieve_response(dataset, embeddings, query, documents)
+        return cls.compact_retrieve_response(dataset, embeddings, query, all_documents)
 
     @classmethod
     def compact_retrieve_response(cls, dataset: Dataset, embeddings: Embeddings, query: str, documents: List[Document]):
@@ -96,7 +160,7 @@ class HitTestingService:
 
             record = {
                 "segment": segment,
-                "score": document.metadata['score'],
+                "score": document.metadata.get('score', None),
                 "tsne_position": tsne_position_data[i]
             }
 
@@ -133,3 +197,11 @@ class HitTestingService:
             tsne_position_data.append({'x': float(data_tsne[i][0]), 'y': float(data_tsne[i][1])})
 
         return tsne_position_data
+
+    @classmethod
+    def hit_testing_args_check(cls, args):
+        query = args['query']
+
+        if not query or len(query) > 250:
+            raise ValueError('Query is required and cannot exceed 250 characters')
+

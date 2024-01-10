@@ -1,8 +1,10 @@
 import json
 from typing import Optional, Union, List
 
-from core.completion import Completion
 from core.generator.llm_generator import LLMGenerator
+from core.memory.token_buffer_memory import TokenBufferMemory
+from core.model_manager import ModelManager
+from core.model_runtime.entities.model_entities import ModelType
 from libs.infinite_scroll_pagination import InfiniteScrollPagination
 from extensions.ext_database import db
 from models.account import Account
@@ -16,7 +18,7 @@ from services.errors.message import FirstMessageNotExistsError, MessageNotExists
 
 class MessageService:
     @classmethod
-    def pagination_by_first_id(cls, app_model: App, user: Optional[Union[Account | EndUser]],
+    def pagination_by_first_id(cls, app_model: App, user: Optional[Union[Account, EndUser]],
                                conversation_id: str, first_id: Optional[str], limit: int) -> InfiniteScrollPagination:
         if not user:
             return InfiniteScrollPagination(data=[], limit=limit, has_more=False)
@@ -68,7 +70,7 @@ class MessageService:
         )
 
     @classmethod
-    def pagination_by_last_id(cls, app_model: App, user: Optional[Union[Account | EndUser]],
+    def pagination_by_last_id(cls, app_model: App, user: Optional[Union[Account, EndUser]],
                               last_id: Optional[str], limit: int, conversation_id: Optional[str] = None,
                               include_ids: Optional[list] = None) -> InfiniteScrollPagination:
         if not user:
@@ -119,7 +121,7 @@ class MessageService:
         )
 
     @classmethod
-    def create_feedback(cls, app_model: App, message_id: str, user: Optional[Union[Account | EndUser]],
+    def create_feedback(cls, app_model: App, message_id: str, user: Optional[Union[Account, EndUser]],
                         rating: Optional[str]) -> MessageFeedback:
         if not user:
             raise ValueError('user cannot be None')
@@ -155,7 +157,7 @@ class MessageService:
         return feedback
 
     @classmethod
-    def get_message(cls, app_model: App, user: Optional[Union[Account | EndUser]], message_id: str):
+    def get_message(cls, app_model: App, user: Optional[Union[Account, EndUser]], message_id: str):
         message = db.session.query(Message).filter(
             Message.id == message_id,
             Message.app_id == app_model.id,
@@ -170,7 +172,7 @@ class MessageService:
         return message
 
     @classmethod
-    def get_suggested_questions_after_answer(cls, app_model: App, user: Optional[Union[Account | EndUser]],
+    def get_suggested_questions_after_answer(cls, app_model: App, user: Optional[Union[Account, EndUser]],
                                              message_id: str, check_enabled: bool = True) -> List[Message]:
         if not user:
             raise ValueError('user cannot be None')
@@ -216,21 +218,27 @@ class MessageService:
             raise SuggestedQuestionsAfterAnswerDisabledError()
 
         # get memory of conversation (read-only)
-        memory = Completion.get_memory_from_conversation(
+        model_manager = ModelManager()
+        model_instance = model_manager.get_model_instance(
             tenant_id=app_model.tenant_id,
-            app_model_config=app_model_config,
-            conversation=conversation,
-            max_token_limit=3000,
-            message_limit=3,
-            return_messages=False,
-            memory_key="histories"
+            provider=app_model_config.model_dict['provider'],
+            model_type=ModelType.LLM,
+            model=app_model_config.model_dict['name']
         )
 
-        external_context = memory.load_memory_variables({})
+        memory = TokenBufferMemory(
+            conversation=conversation,
+            model_instance=model_instance
+        )
+
+        histories = memory.get_history_prompt_text(
+            max_token_limit=3000,
+            message_limit=3,
+        )
 
         questions = LLMGenerator.generate_suggested_questions_after_answer(
             tenant_id=app_model.tenant_id,
-            **external_context
+            histories=histories
         )
 
         return questions

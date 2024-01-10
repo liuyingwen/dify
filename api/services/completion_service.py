@@ -1,26 +1,16 @@
 import json
-import logging
-import threading
-import time
-import uuid
 from typing import Generator, Union, Any
 
-from flask import current_app, Flask
-from redis.client import PubSub
 from sqlalchemy import and_
 
-from core.completion import Completion
-from core.conversation_message_task import PubHandler, ConversationTaskStoppedException
-from core.model_providers.error import LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError, \
-    LLMRateLimitError, \
-    LLMAuthorizationError, ProviderTokenNotInitError, QuotaExceededError, ModelCurrentlyNotSupportError
+from core.application_manager import ApplicationManager
+from core.entities.application_entities import InvokeFrom
+from core.file.message_file_parser import MessageFileParser
 from extensions.ext_database import db
-from extensions.ext_redis import redis_client
 from models.model import Conversation, AppModelConfig, App, Account, EndUser, Message
 from services.app_model_config_service import AppModelConfigService
 from services.errors.app import MoreLikeThisDisabledError
 from services.errors.app_model_config import AppModelConfigBrokenError
-from services.errors.completion import CompletionStoppedError
 from services.errors.conversation import ConversationNotExistsError, ConversationCompletedError
 from services.errors.message import MessageNotExistsError
 
@@ -28,12 +18,15 @@ from services.errors.message import MessageNotExistsError
 class CompletionService:
 
     @classmethod
-    def completion(cls, app_model: App, user: Union[Account | EndUser], args: Any,
-                   from_source: str, streaming: bool = True,
-                   is_model_config_override: bool = False) -> Union[dict | Generator]:
+    def completion(cls, app_model: App, user: Union[Account, EndUser], args: Any,
+                   invoke_from: InvokeFrom, streaming: bool = True,
+                   is_model_config_override: bool = False) -> Union[dict, Generator]:
         # is streaming mode
         inputs = args['inputs']
         query = args['query']
+        files = args['files'] if 'files' in args and args['files'] else []
+        auto_generate_name = args['auto_generate_name'] \
+            if 'auto_generate_name' in args else True
 
         if app_model.mode != 'completion' and not query:
             raise ValueError('query is required')
@@ -50,7 +43,7 @@ class CompletionService:
                 Conversation.status == 'normal'
             ]
 
-            if from_source == 'console':
+            if isinstance(user, Account):
                 conversation_filter.append(Conversation.from_account_id == user.id)
             else:
                 conversation_filter.append(Conversation.from_end_user_id == user.id if user else None)
@@ -117,7 +110,8 @@ class CompletionService:
                 model_config = AppModelConfigService.validate_configuration(
                     tenant_id=app_model.tenant_id,
                     account=user,
-                    config=args['model_config']
+                    config=args['model_config'],
+                    app_mode=app_model.mode
                 )
 
                 app_model_config = AppModelConfig(
@@ -130,114 +124,37 @@ class CompletionService:
         # clean input by app_model_config form rules
         inputs = cls.get_cleaned_inputs(inputs, app_model_config)
 
-        generate_task_id = str(uuid.uuid4())
+        # parse files
+        message_file_parser = MessageFileParser(tenant_id=app_model.tenant_id, app_id=app_model.id)
+        file_objs = message_file_parser.validate_and_transform_files_arg(
+            files,
+            app_model_config,
+            user
+        )
 
-        pubsub = redis_client.pubsub()
-        pubsub.subscribe(PubHandler.generate_channel_name(user, generate_task_id))
-
-        user = cls.get_real_user_instead_of_proxy_obj(user)
-
-        generate_worker_thread = threading.Thread(target=cls.generate_worker, kwargs={
-            'flask_app': current_app._get_current_object(),
-            'generate_task_id': generate_task_id,
-            'app_model': app_model,
-            'app_model_config': app_model_config,
-            'query': query,
-            'inputs': inputs,
-            'user': user,
-            'conversation': conversation,
-            'streaming': streaming,
-            'is_model_config_override': is_model_config_override,
-            'retriever_from': args['retriever_from'] if 'retriever_from' in args else 'dev'
-        })
-
-        generate_worker_thread.start()
-
-        # wait for 10 minutes to close the thread
-        cls.countdown_and_close(generate_worker_thread, pubsub, user, generate_task_id)
-
-        return cls.compact_response(pubsub, streaming)
-
-    @classmethod
-    def get_real_user_instead_of_proxy_obj(cls, user: Union[Account, EndUser]):
-        if isinstance(user, Account):
-            user = db.session.query(Account).filter(Account.id == user.id).first()
-        elif isinstance(user, EndUser):
-            user = db.session.query(EndUser).filter(EndUser.id == user.id).first()
-        else:
-            raise Exception("Unknown user type")
-
-        return user
+        application_manager = ApplicationManager()
+        return application_manager.generate(
+            tenant_id=app_model.tenant_id,
+            app_id=app_model.id,
+            app_model_config_id=app_model_config.id,
+            app_model_config_dict=app_model_config.to_dict(),
+            app_model_config_override=is_model_config_override,
+            user=user,
+            invoke_from=invoke_from,
+            inputs=inputs,
+            query=query,
+            files=file_objs,
+            conversation=conversation,
+            stream=streaming,
+            extras={
+                "auto_generate_conversation_name": auto_generate_name
+            }
+        )
 
     @classmethod
-    def generate_worker(cls, flask_app: Flask, generate_task_id: str, app_model: App, app_model_config: AppModelConfig,
-                        query: str, inputs: dict, user: Union[Account, EndUser],
-                        conversation: Conversation, streaming: bool, is_model_config_override: bool,
-                        retriever_from: str = 'dev'):
-        with flask_app.app_context():
-            try:
-                if conversation:
-                    # fixed the state of the conversation object when it detached from the original session
-                    conversation = db.session.query(Conversation).filter_by(id=conversation.id).first()
-
-                # run
-
-                Completion.generate(
-                    task_id=generate_task_id,
-                    app=app_model,
-                    app_model_config=app_model_config,
-                    query=query,
-                    inputs=inputs,
-                    user=user,
-                    conversation=conversation,
-                    streaming=streaming,
-                    is_override=is_model_config_override,
-                    retriever_from=retriever_from
-                )
-            except ConversationTaskStoppedException:
-                pass
-            except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                    LLMRateLimitError, ProviderTokenNotInitError, QuotaExceededError,
-                    ModelCurrentlyNotSupportError) as e:
-                db.session.rollback()
-                PubHandler.pub_error(user, generate_task_id, e)
-            except LLMAuthorizationError:
-                db.session.rollback()
-                PubHandler.pub_error(user, generate_task_id, LLMAuthorizationError('Incorrect API key provided'))
-            except Exception as e:
-                db.session.rollback()
-                logging.exception("Unknown Error in completion")
-                PubHandler.pub_error(user, generate_task_id, e)
-
-    @classmethod
-    def countdown_and_close(cls, worker_thread, pubsub, user, generate_task_id) -> threading.Thread:
-        # wait for 10 minutes to close the thread
-        timeout = 600
-
-        def close_pubsub():
-            sleep_iterations = 0
-            while sleep_iterations < timeout and worker_thread.is_alive():
-                if sleep_iterations > 0 and sleep_iterations % 10 == 0:
-                    PubHandler.ping(user, generate_task_id)
-
-                time.sleep(1)
-                sleep_iterations += 1
-
-            if worker_thread.is_alive():
-                PubHandler.stop(user, generate_task_id)
-                try:
-                    pubsub.close()
-                except:
-                    pass
-
-        countdown_thread = threading.Thread(target=close_pubsub)
-        countdown_thread.start()
-
-        return countdown_thread
-
-    @classmethod
-    def generate_more_like_this(cls, app_model: App, user: Union[Account | EndUser],
-                                message_id: str, streaming: bool = True) -> Union[dict | Generator]:
+    def generate_more_like_this(cls, app_model: App, user: Union[Account, EndUser],
+                                message_id: str, invoke_from: InvokeFrom, streaming: bool = True) \
+            -> Union[dict, Generator]:
         if not user:
             raise ValueError('user cannot be None')
 
@@ -259,69 +176,36 @@ class CompletionService:
             raise MoreLikeThisDisabledError()
 
         app_model_config = message.app_model_config
+        model_dict = app_model_config.model_dict
+        completion_params = model_dict.get('completion_params')
+        completion_params['temperature'] = 0.9
+        model_dict['completion_params'] = completion_params
+        app_model_config.model = json.dumps(model_dict)
 
-        if message.override_model_configs:
-            override_model_configs = json.loads(message.override_model_configs)
-            pre_prompt = override_model_configs.get("pre_prompt", '')
-        elif app_model_config:
-            pre_prompt = app_model_config.pre_prompt
-        else:
-            raise AppModelConfigBrokenError()
+        # parse files
+        message_file_parser = MessageFileParser(tenant_id=app_model.tenant_id, app_id=app_model.id)
+        file_objs = message_file_parser.transform_message_files(
+            message.files, app_model_config
+        )
 
-        generate_task_id = str(uuid.uuid4())
-
-        pubsub = redis_client.pubsub()
-        pubsub.subscribe(PubHandler.generate_channel_name(user, generate_task_id))
-
-        user = cls.get_real_user_instead_of_proxy_obj(user)
-
-        generate_worker_thread = threading.Thread(target=cls.generate_more_like_this_worker, kwargs={
-            'flask_app': current_app._get_current_object(),
-            'generate_task_id': generate_task_id,
-            'app_model': app_model,
-            'app_model_config': app_model_config,
-            'message': message,
-            'pre_prompt': pre_prompt,
-            'user': user,
-            'streaming': streaming
-        })
-
-        generate_worker_thread.start()
-
-        cls.countdown_and_close(generate_worker_thread, pubsub, user, generate_task_id)
-
-        return cls.compact_response(pubsub, streaming)
-
-    @classmethod
-    def generate_more_like_this_worker(cls, flask_app: Flask, generate_task_id: str, app_model: App,
-                                       app_model_config: AppModelConfig, message: Message, pre_prompt: str,
-                                       user: Union[Account, EndUser], streaming: bool):
-        with flask_app.app_context():
-            try:
-                # run
-                Completion.generate_more_like_this(
-                    task_id=generate_task_id,
-                    app=app_model,
-                    user=user,
-                    message=message,
-                    pre_prompt=pre_prompt,
-                    app_model_config=app_model_config,
-                    streaming=streaming
-                )
-            except ConversationTaskStoppedException:
-                pass
-            except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                    LLMRateLimitError, ProviderTokenNotInitError, QuotaExceededError,
-                    ModelCurrentlyNotSupportError) as e:
-                db.session.rollback()
-                PubHandler.pub_error(user, generate_task_id, e)
-            except LLMAuthorizationError:
-                db.session.rollback()
-                PubHandler.pub_error(user, generate_task_id, LLMAuthorizationError('Incorrect API key provided'))
-            except Exception as e:
-                db.session.rollback()
-                logging.exception("Unknown Error in completion")
-                PubHandler.pub_error(user, generate_task_id, e)
+        application_manager = ApplicationManager()
+        return application_manager.generate(
+            tenant_id=app_model.tenant_id,
+            app_id=app_model.id,
+            app_model_config_id=app_model_config.id,
+            app_model_config_dict=app_model_config.to_dict(),
+            app_model_config_override=True,
+            user=user,
+            invoke_from=invoke_from,
+            inputs=message.inputs,
+            query=message.query,
+            files=file_objs,
+            conversation=None,
+            stream=streaming,
+            extras={
+                "auto_generate_conversation_name": False
+            }
+        )
 
     @classmethod
     def get_cleaned_inputs(cls, user_inputs: dict, app_model_config: AppModelConfig):
@@ -361,158 +245,3 @@ class CompletionService:
 
         return filtered_inputs
 
-    @classmethod
-    def compact_response(cls, pubsub: PubSub, streaming: bool = False) -> Union[dict | Generator]:
-        generate_channel = list(pubsub.channels.keys())[0].decode('utf-8')
-        if not streaming:
-            try:
-                for message in pubsub.listen():
-                    if message["type"] == "message":
-                        result = message["data"].decode('utf-8')
-                        result = json.loads(result)
-                        if result.get('error'):
-                            cls.handle_error(result)
-                        if result['event'] == 'message' and 'data' in result:
-                            return cls.get_message_response_data(result.get('data'))
-            except ValueError as e:
-                if e.args[0] != "I/O operation on closed file.":  # ignore this error
-                    raise CompletionStoppedError()
-                else:
-                    logging.exception(e)
-                    raise
-            finally:
-                try:
-                    pubsub.unsubscribe(generate_channel)
-                except ConnectionError:
-                    pass
-        else:
-            def generate() -> Generator:
-                try:
-                    for message in pubsub.listen():
-                        if message["type"] == "message":
-                            result = message["data"].decode('utf-8')
-                            result = json.loads(result)
-                            if result.get('error'):
-                                cls.handle_error(result)
-
-                            event = result.get('event')
-                            if event == "end":
-                                logging.debug("{} finished".format(generate_channel))
-                                break
-
-                            if event == 'message':
-                                yield "data: " + json.dumps(cls.get_message_response_data(result.get('data'))) + "\n\n"
-                            elif event == 'chain':
-                                yield "data: " + json.dumps(cls.get_chain_response_data(result.get('data'))) + "\n\n"
-                            elif event == 'agent_thought':
-                                yield "data: " + json.dumps(
-                                    cls.get_agent_thought_response_data(result.get('data'))) + "\n\n"
-                            elif event == 'message_end':
-                                yield "data: " + json.dumps(
-                                    cls.get_message_end_data(result.get('data'))) + "\n\n"
-                            elif event == 'ping':
-                                yield "event: ping\n\n"
-                            else:
-                                yield "data: " + json.dumps(result) + "\n\n"
-                except ValueError as e:
-                    if e.args[0] != "I/O operation on closed file.":  # ignore this error
-                        logging.exception(e)
-                        raise
-                finally:
-                    try:
-                        pubsub.unsubscribe(generate_channel)
-                    except ConnectionError:
-                        pass
-
-            return generate()
-
-    @classmethod
-    def get_message_response_data(cls, data: dict):
-        response_data = {
-            'event': 'message',
-            'task_id': data.get('task_id'),
-            'id': data.get('message_id'),
-            'answer': data.get('text'),
-            'created_at': int(time.time())
-        }
-
-        if data.get('mode') == 'chat':
-            response_data['conversation_id'] = data.get('conversation_id')
-
-        return response_data
-
-    @classmethod
-    def get_message_end_data(cls, data: dict):
-        response_data = {
-            'event': 'message_end',
-            'task_id': data.get('task_id'),
-            'id': data.get('message_id')
-        }
-        if 'retriever_resources' in data:
-            response_data['retriever_resources'] = data.get('retriever_resources')
-        if data.get('mode') == 'chat':
-            response_data['conversation_id'] = data.get('conversation_id')
-
-        return response_data
-
-    @classmethod
-    def get_chain_response_data(cls, data: dict):
-        response_data = {
-            'event': 'chain',
-            'id': data.get('chain_id'),
-            'task_id': data.get('task_id'),
-            'message_id': data.get('message_id'),
-            'type': data.get('type'),
-            'input': data.get('input'),
-            'output': data.get('output'),
-            'created_at': int(time.time())
-        }
-
-        if data.get('mode') == 'chat':
-            response_data['conversation_id'] = data.get('conversation_id')
-
-        return response_data
-
-    @classmethod
-    def get_agent_thought_response_data(cls, data: dict):
-        response_data = {
-            'event': 'agent_thought',
-            'id': data.get('id'),
-            'chain_id': data.get('chain_id'),
-            'task_id': data.get('task_id'),
-            'message_id': data.get('message_id'),
-            'position': data.get('position'),
-            'thought': data.get('thought'),
-            'tool': data.get('tool'),
-            'tool_input': data.get('tool_input'),
-            'created_at': int(time.time())
-        }
-
-        if data.get('mode') == 'chat':
-            response_data['conversation_id'] = data.get('conversation_id')
-
-        return response_data
-
-    @classmethod
-    def handle_error(cls, result: dict):
-        logging.debug("error: %s", result)
-        error = result.get('error')
-        description = result.get('description')
-
-        # handle errors
-        llm_errors = {
-            'LLMBadRequestError': LLMBadRequestError,
-            'LLMAPIConnectionError': LLMAPIConnectionError,
-            'LLMAPIUnavailableError': LLMAPIUnavailableError,
-            'LLMRateLimitError': LLMRateLimitError,
-            'ProviderTokenNotInitError': ProviderTokenNotInitError,
-            'QuotaExceededError': QuotaExceededError,
-            'ModelCurrentlyNotSupportError': ModelCurrentlyNotSupportError
-        }
-
-        if error in llm_errors:
-            raise llm_errors[error](description)
-        elif error == 'LLMAuthorizationError':
-            raise LLMAuthorizationError('Incorrect API key provided')
-        else:
-            raise Exception(description)

@@ -128,7 +128,7 @@ const SegmentCard: FC<ISegmentCardProps> = ({
                         >
                           <Switch
                             size='md'
-                            disabled={archived}
+                            disabled={archived || detail.status !== 'completed'}
                             defaultValue={enabled}
                             onChange={async (val) => {
                               await onChangeSwitch?.(id, val)
@@ -141,10 +141,16 @@ const SegmentCard: FC<ISegmentCardProps> = ({
                 )}
             </div>
           </>
-          : <div className={s.hitTitleWrapper}>
-            <div className={cn(s.commonIcon, s.targetIcon, loading ? '!bg-gray-300' : '', '!w-3.5 !h-3.5')} />
-            <ProgressBar percent={score ?? 0} loading={loading} />
-          </div>}
+          : (
+            score !== null
+              ? (
+                <div className={s.hitTitleWrapper}>
+                  <div className={cn(s.commonIcon, s.targetIcon, loading ? '!bg-gray-300' : '', '!w-3.5 !h-3.5')} />
+                  <ProgressBar percent={score ?? 0} loading={loading} />
+                </div>
+              )
+              : null
+          )}
       </div>
       {loading
         ? (

@@ -9,6 +9,7 @@ const translation = {
     pinnedTitle: 'Pinned',
     unpinnedTitle: 'Chats',
     newChatDefaultName: 'New conversation',
+    resetChat: 'Reset conversation',
     powerBy: 'Powered by',
     prompt: 'Prompt',
     privatePromptConfigTitle: 'Conversation settings',
@@ -54,6 +55,11 @@ const translation = {
     csvStructureTitle: 'The CSV file must conform to the following structure:',
     downloadTemplate: 'Download the template here',
     field: 'Field',
+    batchFailed: {
+      info: '{{num}} failed executions',
+      retry: 'Retry',
+      outputPlaceholder: 'No output content',
+    },
     errorMsg: {
       empty: 'Please input content in the uploaded file.',
       fileStructNotMatch: 'The uploaded CSV file not match the struct.',

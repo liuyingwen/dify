@@ -89,7 +89,7 @@ const NormalForm = () => {
     }
     try {
       setIsLoading(true)
-      await login({
+      const res = await login({
         url: '/login',
         body: {
           email,
@@ -97,7 +97,8 @@ const NormalForm = () => {
           remember_me: true,
         },
       })
-      router.push('/apps')
+      localStorage.setItem('console_token', res.data)
+      router.replace('/apps')
     }
     finally {
       setIsLoading(false)
@@ -281,13 +282,13 @@ const NormalForm = () => {
             <Link
               className='text-primary-600'
               target={'_blank'}
-              href={locale === 'en' ? 'https://docs.dify.ai/user-agreement/terms-of-service' : 'https://docs.dify.ai/v/zh-hans/yong-hu-xie-yi/fu-wu-xie-yi'}
+              href={locale === 'en' ? 'https://docs.dify.ai/user-agreement/terms-of-service' : 'https://docs.dify.ai/v/zh-hans/user-agreement/terms-of-service'}
             >{t('login.tos')}</Link>
             &nbsp;&&nbsp;
             <Link
               className='text-primary-600'
               target={'_blank'}
-              href={locale === 'en' ? 'https://docs.dify.ai/user-agreement/privacy-policy' : 'https://docs.dify.ai/v/zh-hans/yong-hu-xie-yi/yin-si-xie-yi'}
+              href={locale === 'en' ? 'https://docs.dify.ai/user-agreement/privacy-policy' : 'https://docs.dify.ai/v/zh-hans/user-agreement/privacy-policy'}
             >{t('login.pp')}</Link>
           </div>
 

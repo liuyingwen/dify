@@ -1,19 +1,31 @@
-import json
-from typing import Type
+import threading
+from typing import Type, Optional, List
 
 from flask import current_app
 from langchain.tools import BaseTool
 from pydantic import Field, BaseModel
 
 from core.callback_handler.index_tool_callback_handler import DatasetIndexToolCallbackHandler
-from core.conversation_message_task import ConversationMessageTask
 from core.embedding.cached_embedding import CacheEmbedding
 from core.index.keyword_table_index.keyword_table_index import KeywordTableIndex, KeywordTableConfig
-from core.index.vector_index.vector_index import VectorIndex
-from core.model_providers.error import LLMBadRequestError, ProviderTokenNotInitError
-from core.model_providers.model_factory import ModelFactory
+from core.model_manager import ModelManager
+from core.model_runtime.entities.model_entities import ModelType
+from core.model_runtime.errors.invoke import InvokeAuthorizationError
+from core.rerank.rerank import RerankRunner
 from extensions.ext_database import db
 from models.dataset import Dataset, DocumentSegment, Document
+from services.retrieval_service import RetrievalService
+
+default_retrieval_model = {
+    'search_method': 'semantic_search',
+    'reranking_enable': False,
+    'reranking_model': {
+        'reranking_provider_name': '',
+        'reranking_model_name': ''
+    },
+    'top_k': 2,
+    'score_threshold_enabled': False
+}
 
 
 class DatasetRetrieverToolInput(BaseModel):
@@ -28,11 +40,11 @@ class DatasetRetrieverTool(BaseTool):
 
     tenant_id: str
     dataset_id: str
-    k: int = 3
-    conversation_message_task: ConversationMessageTask
-    return_resource: str
+    top_k: int = 2
+    score_threshold: Optional[float] = None
+    hit_callbacks: List[DatasetIndexToolCallbackHandler] = []
+    return_resource: bool
     retriever_from: str
-
 
     @classmethod
     def from_dataset(cls, dataset: Dataset, **kwargs):
@@ -56,8 +68,13 @@ class DatasetRetrieverTool(BaseTool):
         ).first()
 
         if not dataset:
-            return f'[{self.name} failed to find dataset with id {self.dataset_id}.]'
+            return ''
 
+        for hit_callback in self.hit_callbacks:
+            hit_callback.on_query(query, dataset.id)
+
+        # get retrieval model , if the model is not setting , using default
+        retrieval_model = dataset.retrieval_model if dataset.retrieval_model else default_retrieval_model
         if dataset.indexing_technique == "economy":
             # use keyword table query
             kw_table_index = KeywordTableIndex(
@@ -67,45 +84,97 @@ class DatasetRetrieverTool(BaseTool):
                 )
             )
 
-            documents = kw_table_index.search(query, search_kwargs={'k': self.k})
+            documents = kw_table_index.search(query, search_kwargs={'k': self.top_k})
             return str("\n".join([document.page_content for document in documents]))
         else:
-
+            # get embedding model instance
             try:
-                embedding_model = ModelFactory.get_embedding_model(
+                model_manager = ModelManager()
+                embedding_model = model_manager.get_model_instance(
                     tenant_id=dataset.tenant_id,
-                    model_provider_name=dataset.embedding_model_provider,
-                    model_name=dataset.embedding_model
+                    provider=dataset.embedding_model_provider,
+                    model_type=ModelType.TEXT_EMBEDDING,
+                    model=dataset.embedding_model
                 )
-            except LLMBadRequestError:
+            except InvokeAuthorizationError:
                 return ''
-            except ProviderTokenNotInitError:
-                return ''
+
             embeddings = CacheEmbedding(embedding_model)
 
-            vector_index = VectorIndex(
-                dataset=dataset,
-                config=current_app.config,
-                embeddings=embeddings
-            )
+            documents = []
+            threads = []
+            if self.top_k > 0:
+                # retrieval source with semantic
+                if retrieval_model['search_method'] == 'semantic_search' or retrieval_model['search_method'] == 'hybrid_search':
+                    embedding_thread = threading.Thread(target=RetrievalService.embedding_search, kwargs={
+                        'flask_app': current_app._get_current_object(),
+                        'dataset_id': str(dataset.id),
+                        'query': query,
+                        'top_k': self.top_k,
+                        'score_threshold': retrieval_model['score_threshold'] if retrieval_model[
+                            'score_threshold_enabled'] else None,
+                        'reranking_model': retrieval_model['reranking_model'] if retrieval_model[
+                            'reranking_enable'] else None,
+                        'all_documents': documents,
+                        'search_method': retrieval_model['search_method'],
+                        'embeddings': embeddings
+                    })
+                    threads.append(embedding_thread)
+                    embedding_thread.start()
 
-            if self.k > 0:
-                documents = vector_index.search(
-                    query,
-                    search_type='similarity_score_threshold',
-                    search_kwargs={
-                        'k': self.k
-                    }
-                )
+                # retrieval_model source with full text
+                if retrieval_model['search_method'] == 'full_text_search' or retrieval_model['search_method'] == 'hybrid_search':
+                    full_text_index_thread = threading.Thread(target=RetrievalService.full_text_index_search, kwargs={
+                        'flask_app': current_app._get_current_object(),
+                        'dataset_id': str(dataset.id),
+                        'query': query,
+                        'search_method': retrieval_model['search_method'],
+                        'embeddings': embeddings,
+                        'score_threshold': retrieval_model['score_threshold'] if retrieval_model[
+                            'score_threshold_enabled'] else None,
+                        'top_k': self.top_k,
+                        'reranking_model': retrieval_model['reranking_model'] if retrieval_model[
+                            'reranking_enable'] else None,
+                        'all_documents': documents
+                    })
+                    threads.append(full_text_index_thread)
+                    full_text_index_thread.start()
+
+                for thread in threads:
+                    thread.join()
+
+                # hybrid search: rerank after all documents have been searched
+                if retrieval_model['search_method'] == 'hybrid_search':
+                    # get rerank model instance
+                    try:
+                        model_manager = ModelManager()
+                        rerank_model_instance = model_manager.get_model_instance(
+                            tenant_id=dataset.tenant_id,
+                            provider=retrieval_model['reranking_model']['reranking_provider_name'],
+                            model_type=ModelType.RERANK,
+                            model=retrieval_model['reranking_model']['reranking_model_name']
+                        )
+                    except InvokeAuthorizationError:
+                        return ''
+
+                    rerank_runner = RerankRunner(rerank_model_instance)
+                    documents = rerank_runner.run(
+                        query=query,
+                        documents=documents,
+                        score_threshold=retrieval_model['score_threshold'] if retrieval_model[
+                            'score_threshold_enabled'] else None,
+                        top_n=self.top_k
+                    )
             else:
                 documents = []
 
-            hit_callback = DatasetIndexToolCallbackHandler(dataset.id, self.conversation_message_task)
-            hit_callback.on_tool_end(documents)
+            for hit_callback in self.hit_callbacks:
+                hit_callback.on_tool_end(documents)
             document_score_list = {}
             if dataset.indexing_technique != "economy":
                 for item in documents:
-                    document_score_list[item.metadata['doc_id']] = item.metadata['score']
+                    if 'score' in item.metadata and item.metadata['score']:
+                        document_score_list[item.metadata['doc_id']] = item.metadata['score']
             document_context_list = []
             index_node_ids = [document.metadata['doc_id'] for document in documents]
             segments = DocumentSegment.query.filter(DocumentSegment.dataset_id == self.dataset_id,
@@ -143,10 +212,10 @@ class DatasetRetrieverTool(BaseTool):
                                 'document_name': document.name,
                                 'data_source_type': document.data_source_type,
                                 'segment_id': segment.id,
-                                'retriever_from': self.retriever_from
+                                'retriever_from': self.retriever_from,
+                                'score': document_score_list.get(segment.index_node_id, None)
+
                             }
-                            if dataset.indexing_technique != "economy":
-                                source['score'] = document_score_list.get(segment.index_node_id)
                             if self.retriever_from == 'dev':
                                 source['hit_count'] = segment.hit_count
                                 source['word_count'] = segment.word_count
@@ -158,7 +227,9 @@ class DatasetRetrieverTool(BaseTool):
                                 source['content'] = segment.content
                             context_list.append(source)
                         resource_number += 1
-                    hit_callback.return_retriever_resource_info(context_list)
+
+                    for hit_callback in self.hit_callbacks:
+                        hit_callback.return_retriever_resource_info(context_list)
 
             return str("\n".join(document_context_list))
 

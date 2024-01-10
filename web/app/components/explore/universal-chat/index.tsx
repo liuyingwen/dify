@@ -10,7 +10,6 @@ import produce from 'immer'
 import { useBoolean, useGetState } from 'ahooks'
 import AppUnavailable from '../../base/app-unavailable'
 import useConversation from './hooks/use-conversation'
-import s from './style.module.css'
 import Init from './init'
 import { ToastContext } from '@/app/components/base/toast'
 import Sidebar from '@/app/components/share/chat/sidebar'
@@ -20,6 +19,7 @@ import {
   fetchChatList,
   fetchConversations,
   fetchSuggestedQuestions,
+  generationConversationName,
   pinConversation,
   sendChatMessage,
   stopChatMessageResponding,
@@ -39,8 +39,8 @@ import type { DataSet } from '@/models/datasets'
 import ConfigSummary from '@/app/components/explore/universal-chat/config-view/summary'
 import { fetchDatasets } from '@/service/datasets'
 import ItemOperation from '@/app/components/explore/item-operation'
+import { useCurrentProviderAndModel } from '@/app/components/header/account-setting/model-provider-page/hooks'
 import { useProviderContext } from '@/context/provider-context'
-import type { ProviderEnum } from '@/app/components/header/account-setting/model-page/declarations'
 
 const APP_ID = 'universal-chat'
 const DEFAULT_PLUGIN = {
@@ -76,8 +76,8 @@ const Main: FC<IMainProps> = () => {
   const getInitConfig = (type: 'model' | 'plugin') => {
     if (type === 'model') {
       return {
-        providerName: prevConfig?.providerName || agentThoughtModelList?.[0]?.model_provider.provider_name,
-        modelId: prevConfig?.modelId || agentThoughtModelList?.[0]?.model_name,
+        providerName: prevConfig?.providerName || agentThoughtModelList[0]?.provider,
+        modelId: prevConfig?.modelId || agentThoughtModelList[0]?.models[0]?.model,
       }
     }
 
@@ -452,9 +452,16 @@ const Main: FC<IMainProps> = () => {
   const [hasStopResponded, setHasStopResponded, getHasStopResponded] = useGetState(false)
   const [errorHappened, setErrorHappened] = useState(false)
   const [isResponsingConIsCurrCon, setIsResponsingConCurrCon, getIsResponsingConIsCurrCon] = useGetState(true)
+  const initConfig = getInitConfig('model')
+  const [modelId, setModeId] = useState<string>((initConfig as any)?.modelId as string)
+  const [providerName, setProviderName] = useState<string>((initConfig as any)?.providerName)
+  const { currentModel } = useCurrentProviderAndModel(
+    agentThoughtModelList,
+    { provider: providerName, model: modelId },
+  )
   const handleSend = async (message: string) => {
     if (isNewConversation) {
-      const isModelSelected = modelId && !!agentThoughtModelList.find(item => item.model_name === modelId)
+      const isModelSelected = modelId && !!currentModel
       if (!isModelSelected) {
         notify({ type: 'error', message: t('appDebug.errorMessage.notSelectModel') })
         return
@@ -564,7 +571,11 @@ const Main: FC<IMainProps> = () => {
 
         if (getConversationIdChangeBecauseOfNew()) {
           const { data: allConversations }: any = await fetchAllConversations()
-          setAllConversationList(allConversations)
+          const newItem: any = await generationConversationName(allConversations[0].id)
+          const newAllConversations = produce(allConversations, (draft: any) => {
+            draft[0].name = newItem.name
+          })
+          setAllConversationList(newAllConversations as any)
           noticeUpdateList()
         }
         setConversationIdChangeBecauseOfNew(false)
@@ -597,7 +608,7 @@ const Main: FC<IMainProps> = () => {
         setChatList(newListWithAnswer)
       },
       onMessageEnd: (messageEnd) => {
-        responseItem.citation = messageEnd.retriever_resources
+        responseItem.citation = messageEnd.metadata?.retriever_resources
 
         const newListWithAnswer = produce(
           getChatList().filter(item => item.id !== responseItem.id && item.id !== placeholderAnswerId),
@@ -683,12 +694,10 @@ const Main: FC<IMainProps> = () => {
         onUnpin={handleUnpin}
         controlUpdateList={controlUpdateConversationList}
         onDelete={handleDelete}
+        onStartChat={() => handleConversationIdChange('-1')}
       />
     )
   }
-  const initConfig = getInitConfig('model')
-  const [modelId, setModeId] = useState<string>((initConfig as any)?.modelId as string)
-  const [providerName, setProviderName] = useState<ProviderEnum>((initConfig as any)?.providerName as ProviderEnum)
   // const currModel = MODEL_LIST.find(item => item.id === modelId)
 
   const [plugins, setPlugins] = useState<Record<string, boolean>>(getInitConfig('plugin') as Record<string, boolean>)
@@ -702,7 +711,7 @@ const Main: FC<IMainProps> = () => {
   const configSetDefaultValue = () => {
     const initConfig = getInitConfig('model')
     setModeId((initConfig as any)?.modelId as string)
-    setProviderName((initConfig as any)?.providerName as ProviderEnum)
+    setProviderName((initConfig as any)?.providerName)
     setPlugins(getInitConfig('plugin') as any)
     setDateSets([])
   }
@@ -715,10 +724,10 @@ const Main: FC<IMainProps> = () => {
     return <Loading type='app' />
 
   return (
-    <div className='bg-gray-100'>
+    <div className='bg-gray-100 h-full'>
       <div
         className={cn(
-          'flex rounded-t-2xl bg-white overflow-hidden rounded-b-2xl',
+          'flex rounded-t-2xl bg-white overflow-hidden rounded-b-2xl h-full',
         )}
         style={{
           boxShadow: '0px 12px 16px -4px rgba(16, 24, 40, 0.08), 0px 4px 6px -2px rgba(16, 24, 40, 0.03)',
@@ -738,8 +747,7 @@ const Main: FC<IMainProps> = () => {
         )}
         {/* main */}
         <div className={cn(
-          s.installedApp,
-          'flex-grow flex flex-col overflow-y-auto',
+          'h-full flex-grow flex flex-col overflow-y-auto',
         )
         }>
           {(!isNewConversation || isResponsing || errorHappened) && (

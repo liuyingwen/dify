@@ -13,9 +13,10 @@ from controllers.web.error import AppUnavailableError, ConversationCompletedErro
     ProviderNotInitializeError, NotChatAppError, NotCompletionAppError, CompletionRequestError, \
     ProviderQuotaExceededError, ProviderModelCurrentlyNotSupportError
 from controllers.web.wraps import WebApiResource
-from core.conversation_message_task import PubHandler
-from core.model_providers.error import LLMBadRequestError, LLMAPIUnavailableError, LLMAuthorizationError, LLMAPIConnectionError, \
-    LLMRateLimitError, ProviderTokenNotInitError, QuotaExceededError, ModelCurrentlyNotSupportError
+from core.application_queue_manager import ApplicationQueueManager
+from core.entities.application_entities import InvokeFrom
+from core.errors.error import ProviderTokenNotInitError, QuotaExceededError, ModelCurrentlyNotSupportError
+from core.model_runtime.errors.invoke import InvokeError
 from libs.helper import uuid_value
 from services.completion_service import CompletionService
 
@@ -30,19 +31,21 @@ class CompletionApi(WebApiResource):
         parser = reqparse.RequestParser()
         parser.add_argument('inputs', type=dict, required=True, location='json')
         parser.add_argument('query', type=str, location='json', default='')
+        parser.add_argument('files', type=list, required=False, location='json')
         parser.add_argument('response_mode', type=str, choices=['blocking', 'streaming'], location='json')
         parser.add_argument('retriever_from', type=str, required=False, default='web_app', location='json')
 
         args = parser.parse_args()
 
         streaming = args['response_mode'] == 'streaming'
+        args['auto_generate_name'] = False
 
         try:
             response = CompletionService.completion(
                 app_model=app_model,
                 user=end_user,
                 args=args,
-                from_source='api',
+                invoke_from=InvokeFrom.WEB_APP,
                 streaming=streaming
             )
 
@@ -60,9 +63,8 @@ class CompletionApi(WebApiResource):
             raise ProviderQuotaExceededError()
         except ModelCurrentlyNotSupportError:
             raise ProviderModelCurrentlyNotSupportError()
-        except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                LLMRateLimitError, LLMAuthorizationError) as e:
-            raise CompletionRequestError(str(e))
+        except InvokeError as e:
+            raise CompletionRequestError(e.description)
         except ValueError as e:
             raise e
         except Exception as e:
@@ -75,7 +77,7 @@ class CompletionStopApi(WebApiResource):
         if app_model.mode != 'completion':
             raise NotCompletionAppError()
 
-        PubHandler.stop(end_user, task_id)
+        ApplicationQueueManager.set_stop_flag(task_id, InvokeFrom.WEB_APP, end_user.id)
 
         return {'result': 'success'}, 200
 
@@ -88,6 +90,7 @@ class ChatApi(WebApiResource):
         parser = reqparse.RequestParser()
         parser.add_argument('inputs', type=dict, required=True, location='json')
         parser.add_argument('query', type=str, required=True, location='json')
+        parser.add_argument('files', type=list, required=False, location='json')
         parser.add_argument('response_mode', type=str, choices=['blocking', 'streaming'], location='json')
         parser.add_argument('conversation_id', type=uuid_value, location='json')
         parser.add_argument('retriever_from', type=str, required=False, default='web_app', location='json')
@@ -95,13 +98,14 @@ class ChatApi(WebApiResource):
         args = parser.parse_args()
 
         streaming = args['response_mode'] == 'streaming'
+        args['auto_generate_name'] = False
 
         try:
             response = CompletionService.completion(
                 app_model=app_model,
                 user=end_user,
                 args=args,
-                from_source='api',
+                invoke_from=InvokeFrom.WEB_APP,
                 streaming=streaming
             )
 
@@ -119,9 +123,8 @@ class ChatApi(WebApiResource):
             raise ProviderQuotaExceededError()
         except ModelCurrentlyNotSupportError:
             raise ProviderModelCurrentlyNotSupportError()
-        except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                LLMRateLimitError, LLMAuthorizationError) as e:
-            raise CompletionRequestError(str(e))
+        except InvokeError as e:
+            raise CompletionRequestError(e.description)
         except ValueError as e:
             raise e
         except Exception as e:
@@ -134,12 +137,12 @@ class ChatStopApi(WebApiResource):
         if app_model.mode != 'chat':
             raise NotChatAppError()
 
-        PubHandler.stop(end_user, task_id)
+        ApplicationQueueManager.set_stop_flag(task_id, InvokeFrom.WEB_APP, end_user.id)
 
         return {'result': 'success'}, 200
 
 
-def compact_response(response: Union[dict | Generator]) -> Response:
+def compact_response(response: Union[dict, Generator]) -> Response:
     if isinstance(response, dict):
         return Response(response=json.dumps(response), status=200, mimetype='application/json')
     else:
@@ -160,9 +163,8 @@ def compact_response(response: Union[dict | Generator]) -> Response:
                 yield "data: " + json.dumps(api.handle_error(ProviderQuotaExceededError()).get_json()) + "\n\n"
             except ModelCurrentlyNotSupportError:
                 yield "data: " + json.dumps(api.handle_error(ProviderModelCurrentlyNotSupportError()).get_json()) + "\n\n"
-            except (LLMBadRequestError, LLMAPIConnectionError, LLMAPIUnavailableError,
-                    LLMRateLimitError, LLMAuthorizationError) as e:
-                yield "data: " + json.dumps(api.handle_error(CompletionRequestError(str(e))).get_json()) + "\n\n"
+            except InvokeError as e:
+                yield "data: " + json.dumps(api.handle_error(CompletionRequestError(e.description)).get_json()) + "\n\n"
             except ValueError as e:
                 yield "data: " + json.dumps(api.handle_error(e).get_json()) + "\n\n"
             except Exception:

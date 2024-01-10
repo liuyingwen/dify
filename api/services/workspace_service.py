@@ -1,7 +1,11 @@
+from flask import current_app
 from flask_login import current_user
 from extensions.ext_database import db
-from models.account import Tenant, TenantAccountJoin
+from models.account import Tenant, TenantAccountJoin, TenantAccountJoinRole
 from models.provider import Provider
+
+from services.feature_service import FeatureService
+from services.account_service import TenantService
 
 
 class WorkspaceService:
@@ -15,7 +19,6 @@ class WorkspaceService:
             'plan': tenant.plan,
             'status': tenant.status,
             'created_at': tenant.created_at,
-            'providers': [],
             'in_trail': True,
             'trial_end_reason': None,
             'role': 'normal',
@@ -28,12 +31,9 @@ class WorkspaceService:
         ).first()
         tenant_info['role'] = tenant_account_join.role
 
-        # Get providers
-        providers = db.session.query(Provider).filter(
-            Provider.tenant_id == tenant.id
-        ).all()
+        can_replace_logo = FeatureService.get_features(tenant_info['id']).can_replace_logo
 
-        # Add providers to the tenant info
-        tenant_info['providers'] = providers
+        if can_replace_logo and TenantService.has_roles(tenant, [TenantAccountJoinRole.OWNER, TenantAccountJoinRole.ADMIN]):
+            tenant_info['custom_config'] = tenant.custom_config_dict
 
         return tenant_info

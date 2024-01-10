@@ -4,7 +4,7 @@ from langchain.schema import Document
 from qdrant_client.http.models import Filter, PointIdsList, FilterSelector
 from qdrant_client.local.qdrant_local import QdrantLocal
 
-from core.index.vector_index.qdrant import Qdrant
+from core.vector_store.vector.qdrant import Qdrant
 
 
 class QdrantVectorStore(Qdrant):
@@ -46,6 +46,11 @@ class QdrantVectorStore(Qdrant):
 
         self.client.delete_collection(collection_name=self.collection_name)
 
+    def delete_group(self):
+        self._reload_if_needed()
+
+        self.client.delete_collection(collection_name=self.collection_name)
+
     @classmethod
     def _document_from_scored_point(
             cls,
@@ -68,3 +73,4 @@ class QdrantVectorStore(Qdrant):
         if isinstance(self.client, QdrantLocal):
             self.client = cast(QdrantLocal, self.client)
             self.client._load()
+

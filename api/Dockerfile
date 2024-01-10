@@ -44,9 +44,6 @@ RUN pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 COPY --from=base /pkg /usr/local
 COPY . /app/api/
 
-RUN #python -c "from transformers import GPT2TokenizerFast; GPT2TokenizerFast.from_pretrained('gpt2')"
-ENV TRANSFORMERS_OFFLINE false
-
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
